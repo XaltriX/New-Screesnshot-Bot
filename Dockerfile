@@ -1,20 +1,22 @@
-# Use an official Python runtime as a base image
 FROM python:3.9-slim
 
-# Set the working directory in the container
+# Set working directory
 WORKDIR /app
 
-# Copy the current directory contents into the container
-COPY . /app
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install the dependencies
+# Copy requirements first for better caching
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install ffmpeg for moviepy (optional, but recommended)
-RUN apt-get update && apt-get install -y ffmpeg
+# Copy bot code
+COPY . .
 
-# Expose the port the app will run on
-EXPOSE 5000
+# Create directory for logs
+RUN mkdir -p /app/logs
 
-# Run the bot script
+# Run the bot
 CMD ["python", "bot.py"]
