@@ -1,0 +1,5 @@
+pyrogram
+moviepy
+numpy
+pillow
+aiohttp
