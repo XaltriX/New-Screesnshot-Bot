@@ -7,7 +7,7 @@ python-dotenv
 python-decouple
 loguru
 opencv-python
-imageio[ffmpeg]
+imageio
 diskcache
 aiocache
 sentry-sdk
