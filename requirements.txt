@@ -4,4 +4,3 @@ pillow==10.0.0
 moviepy==1.0.3
 aiohttp==3.8.5
 numpy==1.24.3
-logging==0.4.9.6
