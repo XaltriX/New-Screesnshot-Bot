@@ -54,16 +54,13 @@ async def get_video_duration(video_path):
         return 0
 
 async def generate_screenshots_with_watermark(video_path, output_dir, duration, count, watermark_text):
-    """Generate screenshots with watermark in single FFmpeg command"""
+    """Generate screenshots WITHOUT FFmpeg watermark (add later with PIL)"""
     print(f"Generating {count} screenshots from {duration}s video...")
     
     interval = duration / (count + 1)
     screenshots = []
     
-    # Escape watermark text for FFmpeg
-    watermark_escaped = watermark_text.replace("'", "'\\\\\\''").replace(":", "\\:")
-    
-    # Generate screenshots one by one for better reliability
+    # Generate screenshots WITHOUT watermark first
     for i in range(1, count + 1):
         timestamp = interval * i
         output_file = os.path.join(output_dir, f"shot_{i:03d}.jpg")
@@ -73,13 +70,6 @@ async def generate_screenshots_with_watermark(video_path, output_dir, duration, 
             '-ss', str(timestamp),
             '-i', video_path,
             '-vframes', '1',
-            '-vf', (
-                f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
-                f"text='{watermark_escaped}':"
-                f"fontsize=40:fontcolor=white@0.8:"
-                f"x=(w-text_w-20):y=(h-text_h-20):"
-                f"box=1:boxcolor=black@0.5:boxborderw=5"
-            ),
             '-q:v', '2',
             '-y',
             output_file
@@ -97,16 +87,60 @@ async def generate_screenshots_with_watermark(video_path, output_dir, duration, 
             stdout, stderr = await proc.communicate()
             
             if proc.returncode == 0 and os.path.exists(output_file):
-                screenshots.append(output_file)
-                print(f"✓ Screenshot {i} created")
+                # Add watermark using PIL
+                try:
+                    img = Image.open(output_file)
+                    draw = ImageDraw.Draw(img)
+                    
+                    # Try to load font
+                    try:
+                        font = ImageFont.truetype("arial.ttf", 40)
+                    except:
+                        font = ImageFont.load_default()
+                    
+                    # Get image size
+                    width, height = img.size
+                    
+                    # Get text size
+                    bbox = draw.textbbox((0, 0), watermark_text, font=font)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                    
+                    # Position at bottom right
+                    x = width - text_width - 20
+                    y = height - text_height - 20
+                    
+                    # Draw background box
+                    padding = 5
+                    draw.rectangle(
+                        [x - padding, y - padding, x + text_width + padding, y + text_height + padding],
+                        fill=(0, 0, 0, 128)
+                    )
+                    
+                    # Draw text
+                    draw.text((x, y), watermark_text, fill='white', font=font)
+                    
+                    # Save
+                    img.save(output_file, quality=90)
+                    
+                    screenshots.append(output_file)
+                    print(f"✓ Screenshot {i} created with watermark")
+                    
+                except Exception as e:
+                    print(f"Watermark error on {i}, keeping without watermark: {e}")
+                    screenshots.append(output_file)
+                    
             else:
                 print(f"✗ Screenshot {i} failed")
                 if stderr:
                     error_msg = stderr.decode()
-                    print(f"FFmpeg error: {error_msg[-500:]}")  # Last 500 chars
+                    print(f"FFmpeg error: {error_msg[-500:]}")
                     
         except Exception as e:
             print(f"Error creating screenshot {i}: {e}")
+    
+    print(f"Total screenshots created: {len(screenshots)}")
+    return screenshots
     
     print(f"Total screenshots created: {len(screenshots)}")
     return screenshots
