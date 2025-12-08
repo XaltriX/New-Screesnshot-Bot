@@ -1,3 +1,4 @@
+# utils.py - Utility Functions
 import os
 import asyncio
 import subprocess
@@ -59,6 +60,9 @@ async def generate_screenshots_with_watermark(video_path, output_dir, duration, 
     interval = duration / (count + 1)
     screenshots = []
     
+    # Escape watermark text for FFmpeg
+    watermark_escaped = watermark_text.replace("'", "'\\\\\\''").replace(":", "\\:")
+    
     # Generate screenshots one by one for better reliability
     for i in range(1, count + 1):
         timestamp = interval * i
@@ -70,7 +74,8 @@ async def generate_screenshots_with_watermark(video_path, output_dir, duration, 
             '-i', video_path,
             '-vframes', '1',
             '-vf', (
-                f"drawtext=text='{watermark_text}':"
+                f"drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+                f"text='{watermark_escaped}':"
                 f"fontsize=40:fontcolor=white@0.8:"
                 f"x=(w-text_w-20):y=(h-text_h-20):"
                 f"box=1:boxcolor=black@0.5:boxborderw=5"
@@ -97,10 +102,14 @@ async def generate_screenshots_with_watermark(video_path, output_dir, duration, 
             else:
                 print(f"✗ Screenshot {i} failed")
                 if stderr:
-                    print(f"FFmpeg error: {stderr.decode()[:200]}")
+                    error_msg = stderr.decode()
+                    print(f"FFmpeg error: {error_msg[-500:]}")  # Last 500 chars
                     
         except Exception as e:
             print(f"Error creating screenshot {i}: {e}")
+    
+    print(f"Total screenshots created: {len(screenshots)}")
+    return screenshots
     
     print(f"Total screenshots created: {len(screenshots)}")
     return screenshots
