@@ -149,7 +149,7 @@ async def generate_screenshots_with_watermark(video_path, output_dir, duration, 
     return screenshots
 
 async def create_collage(screenshot_files, output_path, owner_username):
-    """Create cinematic collage grid"""
+    """Create cinematic collage grid with original aspect ratio maintained"""
     print(f"Creating collage with {len(screenshot_files)} images...")
     
     count = len(screenshot_files)
@@ -172,7 +172,7 @@ async def create_collage(screenshot_files, output_path, owner_username):
     cell_width = COLLAGE_SIZE[0] // cols
     cell_height = (COLLAGE_SIZE[1] - 60) // rows  # Leave space for bottom text
     
-    # Paste screenshots
+    # Paste screenshots with aspect ratio maintained
     for idx, screenshot_path in enumerate(screenshot_files):
         if idx >= rows * cols:
             break
@@ -182,13 +182,30 @@ async def create_collage(screenshot_files, output_path, owner_username):
         
         try:
             img = Image.open(screenshot_path)
-            img = img.resize((cell_width, cell_height), Image.LANCZOS)
+            original_width, original_height = img.size
+            original_ratio = original_width / original_height
             
-            x = col * cell_width
-            y = row * cell_height
+            # Calculate target size maintaining aspect ratio
+            cell_ratio = cell_width / cell_height
+            
+            if original_ratio > cell_ratio:
+                # Image is wider - fit to width
+                new_width = cell_width
+                new_height = int(cell_width / original_ratio)
+            else:
+                # Image is taller - fit to height
+                new_height = cell_height
+                new_width = int(cell_height * original_ratio)
+            
+            # Resize maintaining aspect ratio
+            img = img.resize((new_width, new_height), Image.LANCZOS)
+            
+            # Calculate position to center the image in the cell
+            x = col * cell_width + (cell_width - new_width) // 2
+            y = row * cell_height + (cell_height - new_height) // 2
             
             canvas.paste(img, (x, y))
-            print(f"✓ Pasted image {idx + 1} at ({x}, {y})")
+            print(f"✓ Pasted image {idx + 1} at ({x}, {y}) with size {new_width}x{new_height}")
             
         except Exception as e:
             print(f"Error pasting image {idx + 1}: {e}")
