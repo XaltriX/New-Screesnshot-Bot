@@ -1,414 +1,190 @@
-import os
+# bot.py - Main Bot File
 import asyncio
-import logging
-from typing import List, Optional, Tuple
-import tempfile
-import aiohttp
-import concurrent.futures
-from PIL import Image, ImageDraw, ImageFont
-import sys
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import MessageNotModified, FloodWait
-from moviepy.editor import VideoFileClip
-import numpy as np
-from functools import partial
-import io
-from concurrent.futures import ThreadPoolExecutor
-
-# Configure logging with rotation
-from logging.handlers import RotatingFileHandler
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        RotatingFileHandler(
-            "bot.log",
-            maxBytes=10*1024*1024,  # 10MB
-            backupCount=5
-        ),
-        logging.StreamHandler(sys.stdout)
-    ]
+import os
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from config import API_ID, API_HASH, BOT_TOKEN, OWNER_USERNAME, WATERMARK_TEXT
+from utils import (
+    create_user_temp_dir, cleanup_user_temp, 
+    get_video_duration, generate_screenshots_with_watermark,
+    create_collage, create_zip_archive, format_progress_bar
 )
-logger = logging.getLogger(__name__)
+from uploaders import upload_with_failover
 
-# Bot configuration
-API_ID = 28192191
-API_HASH = '663164abd732848a90e76e25cb9cf54a'
-BOT_TOKEN = '8151073275:AAH3KERuA23PE5DUP23LfuWS2VT5hxjH_yY'
-
-# Constants
-MAX_WORKERS = 4
-MAX_QUEUE_SIZE = 50
-SCREENSHOT_QUALITIES = {
-    "low": 480,
-    "medium": 720,
-    "high": 1080
-}
-DEFAULT_QUALITY = "medium"
-
-# Initialize the thread pool
-thread_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-
-# Initialize the Pyrogram client
+# Initialize bot with increased sleep threshold
 app = Client(
-    "screenshot_bot",
+    "video_screenshot_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=8,
-    in_memory=True
+    sleep_threshold=60,
+    ipv6=False
 )
 
-# Queue with priority support
-class PriorityQueue:
-    def __init__(self, maxsize: int = 0):
-        self.queue = asyncio.PriorityQueue(maxsize)
-        
-    async def put(self, message: Message, priority: int = 2):
-        await self.queue.put((priority, message))
-        
-    async def get(self):
-        priority, message = await self.queue.get()
-        return message
-        
-    def empty(self):
-        return self.queue.empty()
+# User queues and locks
+user_queues = {}
+user_locks = {}
 
-video_queue = PriorityQueue(MAX_QUEUE_SIZE)
-
-class VideoProcessor:
-    def __init__(self):
-        self.session = None
-        
-    async def init_session(self):
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-            
-    async def close_session(self):
-        if self.session:
-            await self.session.close()
-            
-    @staticmethod
-    async def extract_frame(clip: VideoFileClip, time: float, output_path: str, quality: str):
-        frame = clip.get_frame(time)
-        img = Image.fromarray(frame)
-        target_width = SCREENSHOT_QUALITIES[quality]
-        aspect_ratio = img.width / img.height
-        target_height = int(target_width / aspect_ratio)
-        img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        img.save(output_path, quality=95, optimize=True)
-        return output_path
-
-    async def generate_screenshots(
-        self,
-        video_path: str,
-        num_screenshots: int,
-        output_dir: str,
-        quality: str,
-        status_message: Message
-    ) -> List[str]:
-        try:
-            clip = VideoFileClip(video_path)
-            duration = clip.duration
-            interval = duration / (num_screenshots + 1)
-            screenshots = []
-            
-            tasks = []
-            for i in range(1, num_screenshots + 1):
-                time = i * interval
-                screenshot_path = os.path.join(output_dir, f"screenshot_{i}.jpg")
-                task = asyncio.create_task(self.extract_frame(
-                    clip, time, screenshot_path, quality
-                ))
-                tasks.append((task, i))
-                
-            for task, i in tasks:
-                screenshot_path = await task
-                screenshots.append(screenshot_path)
-                
-                percent = int((i / num_screenshots) * 100)
-                bar = create_progress_bar(percent)
-                try:
-                    await status_message.edit_text(
-                        f"Generating screenshots ({quality} quality):\n{bar}"
-                    )
-                except (MessageNotModified, FloodWait) as e:
-                    if isinstance(e, FloodWait):
-                        await asyncio.sleep(e.value)
-                        
-            clip.close()
-            return screenshots
-        except Exception as e:
-            logger.error(f"Error generating screenshots: {e}")
-            return []
-
-video_processor = VideoProcessor()
-
-def get_help_text() -> str:
-    return (
-        "🎥 **Video Screenshot Bot Help**\n\n"
-        "Here's how to use the bot:\n\n"
-        "1. Send any video file to generate screenshots\n"
-        "2. Use these commands:\n"
-        "   • /start - Start the bot\n"
-        "   • /help - Show this help message\n"
-        "   • /settings - Customize screenshot settings\n\n"
-        "Features:\n"
-        "• Generate high-quality screenshots\n"
-        "• Customize quality and number of screenshots\n"
-        "• Create beautiful collages\n"
-        "• Process videos up to 500MB"
-    )
-
-def create_progress_bar(percent: int) -> str:
-    filled = int(percent / 10)
-    return f"{'▰' * filled}{'═' * (10 - filled)} {percent}%"
-
-async def download_video_with_progress(message: Message, file_id: str, file_path: str, status_message: Message):
-    try:
-        async def progress(current, total):
-            percent = int((current / total) * 100)
-            bar = create_progress_bar(percent)
-            try:
-                await status_message.edit_text(f"Downloading video:\n{bar}")
-            except MessageNotModified:
-                pass
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-
-        await message.download(
-            file_name=file_path,
-            progress=progress
-        )
-        logger.info(f"Video download completed for user {message.from_user.id}")
-    except Exception as e:
-        logger.error(f"Error downloading video: {e}")
-        raise
-
-async def process_video(message: Message):
-    video = message.video
-    file_id = video.file_id
-    file_name = f"{file_id}.mp4"
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        video_path = os.path.join(temp_dir, file_name)
-        status_message = await message.reply_text("Initializing processing...")
-
-        try:
-            await download_video_with_progress(message, file_id, video_path, status_message)
-            quality = DEFAULT_QUALITY
-            screenshots = await video_processor.generate_screenshots(
-                video_path, 10, temp_dir, quality, status_message
-            )
-
-            if not screenshots:
-                raise Exception("Failed to generate screenshots")
-
-            await status_message.edit_text("Creating collage...")
-            collage_path = os.path.join(temp_dir, "collage.jpg")
-            
-            images = [Image.open(img) for img in screenshots]
-            base_width = SCREENSHOT_QUALITIES[quality]
-            aspect_ratio = images[0].width / images[0].height
-            image_width = base_width // 3
-            image_height = int(image_width / aspect_ratio)
-            
-            collage_width = image_width * 3
-            collage_height = image_height * 4
-            collage = Image.new('RGB', (collage_width, collage_height), 'white')
-            
-            layout = [
-                (0, 0), (1, 0), (2, 0),
-                (0, 1), (1, 1), (2, 1),
-                (0, 2), (1, 2), (2, 2),
-                (1, 3)
-            ]
-
-            for i, (img, pos) in enumerate(zip(images, layout)):
-                img_resized = img.resize(
-                    (image_width - 4, image_height - 4),
-                    Image.Resampling.LANCZOS
-                )
-                
-                x_pos = pos[0] * image_width + 2
-                y_pos = pos[1] * image_height + 2
-                
-                if i == 9:
-                    x_pos = (collage_width - image_width) // 2
-                collage.paste(img_resized, (x_pos, y_pos))
-
-            collage.save(collage_path, quality=95, optimize=True)
-
-            await status_message.edit_text("Uploading collage...")
-
-            # Upload to envs.sh
-            try:
-                async with aiohttp.ClientSession() as session:
-                    with open(collage_path, 'rb') as f:
-                        files = {'file': f}
-                        async with session.post('https://envs.sh/', data=files) as response:
-                            if response.status == 200:
-                                share_url = await response.text()
-                                # Create keyboard with share URL
-                                keyboard = InlineKeyboardMarkup([[
-                                    InlineKeyboardButton("View Full Size", url=share_url.strip())
-                                ]])
-                                
-                                # Send collage to Telegram with the share URL button
-                                await message.reply_photo(
-                                    photo=collage_path,
-                                    caption=f"Here's your collage of screenshots (Quality: {quality})\nShare link: {share_url.strip()}",
-                                    reply_markup=keyboard
-                                )
-                            else:
-                                # If envs.sh upload fails, still send the collage to Telegram
-                                await message.reply_photo(
-                                    photo=collage_path,
-                                    caption=f"Here's your collage of screenshots (Quality: {quality})\nNote: Failed to generate share link."
-                                )
-            except Exception as upload_error:
-                logger.error(f"Error uploading to envs.sh: {upload_error}")
-                # If envs.sh upload fails, still send the collage to Telegram
-                await message.reply_photo(
-                    photo=collage_path,
-                    caption=f"Here's your collage of screenshots (Quality: {quality})"
-                )
-
-            await status_message.delete()
-
-        except Exception as e:
-            logger.error(f"Error processing video: {e}")
-            error_msg = (
-                "An error occurred while processing your video. "
-                "Please make sure the video is not corrupted and try again."
-            )
-            await status_message.edit_text(error_msg)
-
-async def process_video_queue():
-    while True:
-        try:
-            if not video_queue.empty():
-                message = await video_queue.get()
-                try:
-                    await process_video(message)
-                except Exception as e:
-                    logger.error(f"Error processing video: {e}")
-                    await message.reply_text(
-                        "An error occurred while processing your video. "
-                        "Please try again later."
-                    )
-            else:
-                await asyncio.sleep(1)
-        except Exception as e:
-            logger.error(f"Error in process_video_queue: {e}")
-            await asyncio.sleep(5)
-
-# Command handlers
 @app.on_message(filters.command("start"))
-async def start_command(client, message):
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Help", callback_data="help"),
-            InlineKeyboardButton("Settings", callback_data="settings")
-        ]
-    ])
+async def start_command(client, message: Message):
     await message.reply_text(
-        "Welcome! I'm the Enhanced Screenshot Bot. Send me a video, and I'll generate "
-        "high-quality screenshots for you. You can customize the number of screenshots "
-        "and quality settings.",
-        reply_markup=keyboard
+        f"🎬 **Video Screenshot Bot**\n\n"
+        f"Send me a video and I'll create:\n"
+        f"✓ Watermarked screenshots\n"
+        f"✓ Cinematic collage\n"
+        f"✓ ZIP archive\n\n"
+        f"Powered by @{OWNER_USERNAME}"
     )
 
-@app.on_message(filters.command("help"))
-async def help_command(client, message):
-    await message.reply_text(get_help_text())
+@app.on_message(filters.video | filters.document | filters.video_note)
+async def handle_video(client, message: Message):
+    user_id = message.from_user.id
+    
+    # Get video object
+    video = message.video or message.document or message.video_note
+    
+    # Validate it's a video
+    if message.document and not (message.document.mime_type and message.document.mime_type.startswith('video/')):
+        await message.reply_text("❌ Please send a valid video file.")
+        return
+    
+    # Initialize user queue and lock
+    if user_id not in user_queues:
+        user_queues[user_id] = []
+        user_locks[user_id] = asyncio.Lock()
+    
+    # Add to queue
+    user_queues[user_id].append({
+        'message': message,
+        'video': video
+    })
+    
+    queue_position = len(user_queues[user_id])
+    
+    if queue_position > 1:
+        await message.reply_text(
+            f"⏳ Added to queue. Position: {queue_position}"
+        )
+    
+    # Process if first in queue
+    if queue_position == 1:
+        asyncio.create_task(process_video_queue(client, user_id))
 
-@app.on_message(filters.command("settings"))
-async def settings_command(client, message):
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Low Quality", callback_data="quality_low"),
-            InlineKeyboardButton("Medium Quality", callback_data="quality_medium"),
-            InlineKeyboardButton("High Quality", callback_data="quality_high")
-        ],
-        [
-            InlineKeyboardButton("5 Screenshots", callback_data="count_5"),
-            InlineKeyboardButton("10 Screenshots", callback_data="count_10"),
-            InlineKeyboardButton("15 Screenshots", callback_data="count_15")
-        ]
-    ])
-    await message.reply_text(
-        "Choose your preferred settings:",
-        reply_markup=keyboard
-    )
+async def process_video_queue(client, user_id):
+    """Process all videos in user's queue"""
+    async with user_locks[user_id]:
+        while user_queues[user_id]:
+            item = user_queues[user_id][0]
+            await process_single_video(client, user_id, item)
+            user_queues[user_id].pop(0)
 
-@app.on_callback_query()
-async def handle_callback(client, callback_query: CallbackQuery):
-    data = callback_query.data
-    if data == "help":
-        await callback_query.message.reply_text(get_help_text())
-    elif data == "settings":
-        await settings_command(client, callback_query.message)
-    elif data.startswith("quality_"):
-        quality = data.split("_")[1]
-        await callback_query.answer(f"Quality set to {quality}")
-    elif data.startswith("count_"):
-        count = int(data.split("_")[1])
-        await callback_query.answer(f"Screenshot count set to {count}")
-
-@app.on_message(filters.video)
-async def handle_video(client, message):
+async def process_single_video(client, user_id, item):
+    """Process a single video"""
+    message = item['message']
+    video = item['video']
+    
+    # Get duration
+    duration = video.duration or 0
+    
+    # Determine screenshot count
+    screenshot_count = 5 if duration < 60 else 10
+    
+    # Create temp directory
+    user_temp_dir = create_user_temp_dir(user_id)
+    video_path = os.path.join(user_temp_dir, "video.mp4")
+    
+    # Status message
+    status_msg = await message.reply_text("⬇️ Downloading video...")
+    
     try:
-        if video_queue.queue.qsize() >= MAX_QUEUE_SIZE:
-            await message.reply_text(
-                "The bot is currently processing too many videos. Please try again later."
-            )
-            return
-
-        video = message.video
-        duration = video.duration
-        file_size = video.file_size
-
-        if duration > 3600:
-            await message.reply_text(
-                "Video is too long. Please send a video shorter than 1 hour."
-            )
+        # Download with progress
+        last_update = [0]  # Use list to avoid UnboundLocalError
+        
+        async def progress(current, total):
+            if total > 0 and current - last_update[0] > total * 0.05:  # Update every 5%
+                progress_bar = format_progress_bar(current, total)
+                try:
+                    await status_msg.edit_text(
+                        f"⬇️ Downloading video...\n{progress_bar}"
+                    )
+                    last_update[0] = current
+                except:
+                    pass  # Ignore flood wait errors
+        
+        await message.download(video_path, progress=progress)
+        
+        # Verify duration
+        await status_msg.edit_text("🔍 Analyzing video...")
+        actual_duration = await get_video_duration(video_path)
+        
+        if actual_duration == 0:
+            await status_msg.edit_text("❌ Invalid video file.")
+            cleanup_user_temp(user_id)
             return
         
-        if file_size > 500 * 1024 * 1024:
-            await message.reply_text(
-                "Video file is too large. Please send a video smaller than 500MB."
-            )
-            return
-
-        status_message = await message.reply_text(
-            "Video added to queue. Processing will begin shortly.\n"
-            f"Queue position: {video_queue.queue.qsize() + 1}"
+        # Use actual duration for screenshot count
+        screenshot_count = 5 if actual_duration < 60 else 10
+        
+        # Generate screenshots with watermark (single FFmpeg command)
+        await status_msg.edit_text(f"📸 Generating {screenshot_count} screenshots...")
+        screenshots_dir = os.path.join(user_temp_dir, "screenshots")
+        os.makedirs(screenshots_dir, exist_ok=True)
+        
+        screenshot_files = await generate_screenshots_with_watermark(
+            video_path, screenshots_dir, actual_duration, 
+            screenshot_count, WATERMARK_TEXT
         )
-
-        priority = 1 if file_size < 50 * 1024 * 1024 else 2
-        await video_queue.put(message, priority)
-
+        
+        if not screenshot_files:
+            await status_msg.edit_text("❌ Failed to generate screenshots.")
+            cleanup_user_temp(user_id)
+            return
+        
+        # Create collage
+        await status_msg.edit_text("🎨 Creating collage...")
+        collage_path = os.path.join(user_temp_dir, "collage.jpg")
+        await create_collage(screenshot_files, collage_path, OWNER_USERNAME)
+        
+        # Create ZIP archive
+        await status_msg.edit_text("📦 Creating archive...")
+        zip_path = os.path.join(user_temp_dir, "screenshots.zip")
+        await create_zip_archive(screenshot_files, zip_path)
+        
+        # Upload with failover
+        await status_msg.edit_text("☁️ Uploading files...")
+        
+        collage_url = await upload_with_failover(
+            collage_path, "collage.jpg", client, message.chat.id
+        )
+        zip_url = await upload_with_failover(
+            zip_path, "screenshots.zip", client, message.chat.id
+        )
+        
+        # Send final message
+        final_text = (
+            f"✅ **Processing Complete!**\n\n"
+            f"📊 Screenshots: {len(screenshot_files)}\n"
+            f"⏱️ Duration: {int(actual_duration)}s\n\n"
+        )
+        
+        if collage_url and collage_url != "Upload failed":
+            final_text += f"🖼️ [View Collage]({collage_url})\n"
+        if zip_url and zip_url != "Upload failed":
+            final_text += f"📦 [Download All Screenshots]({zip_url})\n"
+        
+        final_text += f"\n✨ Processed by @{OWNER_USERNAME}"
+        
+        await status_msg.edit_text(final_text, disable_web_page_preview=True)
+        
     except Exception as e:
-        logger.error(f"Error handling video: {e}")
-        await message.reply_text("An error occurred while processing your request.")
-
-async def main():
-    await video_processor.init_session()
-    await app.start()
-    logger.info("Bot started. Processing queue initialized...")
+        print(f"Error processing video: {e}")
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
     
-    queue_processor = asyncio.create_task(process_video_queue())
-    
-    try:
-        await idle()
     finally:
-        queue_processor.cancel()
-        await video_processor.close_session()
-        await app.stop()
+        # Cleanup
+        cleanup_user_temp(user_id)
 
 if __name__ == "__main__":
-    app.run(main())
+    print("🤖 Bot starting...")
+    print(f"Bot username will be displayed after connection...")
+    app.run()
