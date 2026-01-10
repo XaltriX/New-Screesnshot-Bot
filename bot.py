@@ -736,8 +736,11 @@ class MainProcessor:
                         log.error(f"Edit error: {e}")
         
         try:
-            video_hash = VideoProcessor.generate_hash(video.file_id, video.file_size, num_screenshots, quality)
+            # Get quality FIRST before generating hash
             quality = db.get_user_quality(video_msg.from_user.id)
+            
+            # Now generate hash with quality
+            video_hash = VideoProcessor.generate_hash(video.file_id, video.file_size, num_screenshots, quality)
             
             # Show processing status
             await safe_edit(
