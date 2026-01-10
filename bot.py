@@ -394,7 +394,7 @@ class Database:
 
 db = Database()
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 6: VIDEO PROCESSOR (FFmpeg Based)
+# SECTION 6: VIDEO PROCESSOR
 # ═══════════════════════════════════════════════════════════════════
 
 class VideoProcessor:
@@ -413,7 +413,7 @@ class VideoProcessor:
                 '-of', 'default=noprint_wrappers=1:nokey=1',
                 video_path
             ]
-            log.info(f"Getting duration: {' '.join(cmd[:3])}...")
+            log.info(f"Getting duration...")
             
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -438,53 +438,6 @@ class VideoProcessor:
         return None
     
     @staticmethod
-    async def extract_screenshots_moviepy(
-        video_path: str,
-        num_screenshots: int,
-        quality: str,
-        status_msg: Message,
-        safe_edit
-    ) -> List[Tuple[str, float]]:
-        """Extract screenshots using MoviePy (Fallback)"""
-        screenshots = []
-        
-        try:
-            clip = VideoFileClip(video_path)
-            duration = clip.duration
-            interval = duration / (num_screenshots + 1)
-            
-            start_time = time.time()
-            
-            for i in range(1, num_screenshots + 1):
-                timestamp = i * interval
-                frame = clip.get_frame(timestamp)
-                
-                img = Image.fromarray(frame)
-                target_width = Config.QUALITIES[quality]
-                aspect_ratio = img.width / img.height
-                target_height = int(target_width / aspect_ratio)
-                img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
-                
-                screenshot_path = os.path.join(
-                    Config.TEMP_DIR,
-                    f"shot_{int(time.time())}_{i}.jpg"
-                )
-                img.save(screenshot_path, quality=95, optimize=True)
-                screenshots.append((screenshot_path, timestamp))
-                
-                elapsed = int(time.time() - start_time)
-                progress_text = ProgressBar.extraction(i, num_screenshots, elapsed)
-                await safe_edit(status_msg, progress_text)
-            
-            clip.close()
-            log.info(f"Extracted {len(screenshots)} screenshots using MoviePy")
-            return screenshots
-            
-        except Exception as e:
-            log.error(f"MoviePy extraction error: {e}")
-            return []
-    
-    @staticmethod
     async def extract_screenshots_ffmpeg(
         video_path: str,
         num_screenshots: int,
@@ -496,7 +449,6 @@ class VideoProcessor:
         screenshots = []
         
         try:
-            # Get duration
             duration = await VideoProcessor.get_video_info(video_path)
             if not duration:
                 log.error("Could not get video duration")
@@ -531,7 +483,160 @@ class VideoProcessor:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
+                
+                stdout, stderr = await proc.communicate()
+                
+                if os.path.exists(screenshot_path):
+                    screenshots.append((screenshot_path, timestamp))
+                    
+                    elapsed = int(time.time() - start_time)
+                    progress_text = ProgressBar.extraction(i, num_screenshots, elapsed)
+                    await safe_edit(status_msg, progress_text)
+                else:
+                    log.error(f"Screenshot {i} failed")
+                    if stderr:
+                        error_text = stderr.decode()[:300]
+                        log.error(f"FFmpeg error: {error_text}")
+            
+            log.info(f"Successfully extracted {len(screenshots)}/{num_screenshots} screenshots")
+            return screenshots
+            
+        except FileNotFoundError:
+            log.error("FFmpeg command not found!")
+            return []
+        except Exception as e:
+            log.error(f"FFmpeg extraction error: {e}", exc_info=True)
+            return []
+    
+    @staticmethod
+    async def extract_screenshots(
+        video_path: str,
+        num_screenshots: int,
+        quality: str,
+        status_msg: Message,
+        safe_edit
+    ) -> List[Tuple[str, float]]:
+        """Main extraction method"""
+        
+        # Use FFmpeg (MoviePy not needed for Heroku)
+        log.info("Using FFmpeg for extraction")
+        screenshots = await VideoProcessor.extract_screenshots_ffmpeg(
+            video_path, num_screenshots, quality, status_msg, safe_edit
+        )
+        
+        if screenshots:
+            return screenshots
+        
+        log.error("Screenshot extraction failed")
+        return []
 
+# ═══════════════════════════════════════════════════════════════════
+# SECTION 7: COLLAGE CREATOR
+# ═══════════════════════════════════════════════════════════════════
+
+class CollageCreator:
+    @staticmethod
+    def create_cinematic_collage(
+        screenshots: List[Tuple[str, float]],
+        output_path: str
+    ) -> bool:
+        try:
+            num_shots = len(screenshots)
+            
+            if num_shots in Config.GRID_LAYOUTS:
+                rows, cols = Config.GRID_LAYOUTS[num_shots]
+            else:
+                cols = math.ceil(math.sqrt(num_shots))
+                rows = math.ceil(num_shots / cols)
+            
+            first_img = Image.open(screenshots[0][0])
+            img_width, img_height = first_img.size
+            
+            target_collage_width = 3000
+            target_width = (target_collage_width - (Config.FRAME_SPACING * (cols + 1)) - (Config.FRAME_BORDER * 2)) // cols
+            target_height = int(target_width * (img_height / img_width))
+            
+            border = Config.FRAME_BORDER
+            spacing = Config.FRAME_SPACING
+            
+            collage_width = (target_width * cols) + (spacing * (cols + 1)) + (border * 2)
+            collage_height = (target_height * rows) + (spacing * (rows + 1)) + (border * 2)
+            
+            log.info(f"Collage: {collage_width}x{collage_height}, Frame: {target_width}x{target_height}")
+            
+            collage = Image.new('RGB', (collage_width, collage_height), Config.COLLAGE_BACKGROUND)
+            draw = ImageDraw.Draw(collage)
+            
+            try:
+                if sys.platform == 'win32':
+                    font = ImageFont.truetype("C:\\Windows\\Fonts\\arial.ttf", 36)
+                    wm_font = ImageFont.truetype("C:\\Windows\\Fonts\\arialbd.ttf", Config.WATERMARK_FONT_SIZE)
+                else:
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
+                    wm_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", Config.WATERMARK_FONT_SIZE)
+            except:
+                font = ImageFont.load_default()
+                wm_font = font
+            
+            for idx, (img_path, timestamp) in enumerate(screenshots[:num_shots]):
+                row = idx // cols
+                col = idx % cols
+                
+                img = Image.open(img_path)
+                img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                
+                x = border + spacing + (col * (target_width + spacing))
+                y = border + spacing + (row * (target_height + spacing))
+                
+                collage.paste(img, (x, y))
+                
+                time_str = str(datetime.timedelta(seconds=int(timestamp)))
+                text_bbox = draw.textbbox((0, 0), time_str, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                text_height = text_bbox[3] - text_bbox[1]
+                
+                text_bg_x = x + 15
+                text_bg_y = y + target_height - text_height - 25
+                
+                overlay = Image.new('RGBA', collage.size, (0, 0, 0, 0))
+                overlay_draw = ImageDraw.Draw(overlay)
+                overlay_draw.rectangle(
+                    [text_bg_x - 8, text_bg_y - 5,
+                     text_bg_x + text_width + 8, text_bg_y + text_height + 5],
+                    fill=(0, 0, 0, 200)
+                )
+                collage = Image.alpha_composite(collage.convert('RGBA'), overlay).convert('RGB')
+                draw = ImageDraw.Draw(collage)
+                
+                draw.text((text_bg_x, text_bg_y), time_str, font=font, fill='white')
+            
+            watermark = Config.WATERMARK_TEXT
+            wm_bbox = draw.textbbox((0, 0), watermark, font=wm_font)
+            wm_width = wm_bbox[2] - wm_bbox[0]
+            wm_height = wm_bbox[3] - wm_bbox[1]
+            
+            wm_x = collage_width - wm_width - Config.WATERMARK_PADDING - border
+            wm_y = collage_height - wm_height - Config.WATERMARK_PADDING - border
+            
+            overlay = Image.new('RGBA', collage.size, (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            overlay_draw.rectangle(
+                [wm_x - 15, wm_y - 10, wm_x + wm_width + 15, wm_y + wm_height + 10],
+                fill=(0, 0, 0, 180)
+            )
+            collage = Image.alpha_composite(collage.convert('RGBA'), overlay).convert('RGB')
+            draw = ImageDraw.Draw(collage)
+            
+            draw.text((wm_x, wm_y), watermark, font=wm_font, fill='white')
+            
+            collage.save(output_path, quality=95, optimize=True)
+            
+            log.info(f"Collage saved: {os.path.getsize(output_path) / (1024*1024):.2f}MB")
+            return True
+            
+        except Exception as e:
+            log.error(f"Collage creation error: {e}", exc_info=True)
+            return False
 # ═══════════════════════════════════════════════════════════════════
 # SECTION 8: CLOUD UPLOADER (CATBOX + TELEGRAPH ONLY)
 # ═══════════════════════════════════════════════════════════════════
