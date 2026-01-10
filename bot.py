@@ -399,8 +399,10 @@ db = Database()
 
 class VideoProcessor:
     @staticmethod
-    def generate_hash(file_id: str, file_size: int) -> str:
-        return hashlib.md5(f"{file_id}_{file_size}".encode()).hexdigest()
+    def generate_hash(file_id: str, file_size: int, num_screenshots: int = 0, quality: str = "") -> str:
+        """Generate unique hash including screenshot count and quality"""
+        data = f"{file_id}_{file_size}_{num_screenshots}_{quality}".encode()
+        return hashlib.md5(data).hexdigest()
     
     @staticmethod
     async def get_video_info(video_path: str) -> Optional[float]:
@@ -734,7 +736,7 @@ class MainProcessor:
                         log.error(f"Edit error: {e}")
         
         try:
-            video_hash = VideoProcessor.generate_hash(video.file_id, video.file_size)
+            video_hash = VideoProcessor.generate_hash(video.file_id, video.file_size, num_screenshots, quality)
             quality = db.get_user_quality(video_msg.from_user.id)
             
             # Show processing status
@@ -750,31 +752,35 @@ class MainProcessor:
             # Check cache
             cached = db.get_cached_links(video_hash)
             if cached and any([cached.get('catbox'), cached.get('telegraph')]):
-                await safe_edit(status_msg, Messages.CACHE_HIT)
-                await asyncio.sleep(1)
-                
-                links_text = MainProcessor._format_links(cached)
-                
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔗 Catbox", url=cached['catbox'])] if cached.get('catbox') else [],
-                    [InlineKeyboardButton("🔗 Telegraph", url=cached['telegraph'])] if cached.get('telegraph') else [],
-                ])
-                
-                # Reply to original video
-                await video_msg.reply_text(
-                    Messages.SUCCESS.format(
-                        filename=filename,
-                        count=cached['count'],
-                        size="Cached",
-                        duration=int(time.time() - start_time),
-                        quality=cached['quality'],
-                        links=links_text
-                    ),
-                    reply_markup=keyboard if any([cached.get('catbox'), cached.get('telegraph')]) else None
-                )
-                
-                await status_msg.delete()
-                return
+                # Only use cache if screenshot count matches
+                if cached.get('count') == num_screenshots and cached.get('quality') == quality:
+                    await safe_edit(status_msg, Messages.CACHE_HIT)
+                    await asyncio.sleep(1)
+                    
+                    links_text = MainProcessor._format_links(cached)
+                    
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔗 Catbox", url=cached['catbox'])] if cached.get('catbox') else [],
+                        [InlineKeyboardButton("🔗 Telegraph", url=cached['telegraph'])] if cached.get('telegraph') else [],
+                    ])
+                    
+                    # Reply to original video
+                    await video_msg.reply_text(
+                        Messages.SUCCESS.format(
+                            filename=filename,
+                            count=cached['count'],
+                            size="Cached",
+                            duration=int(time.time() - start_time),
+                            quality=cached['quality'],
+                            links=links_text
+                        ),
+                        reply_markup=keyboard if any([cached.get('catbox'), cached.get('telegraph')]) else None
+                    )
+                    
+                    await status_msg.delete()
+                    return
+                else:
+                    log.info(f"Cache found but count/quality mismatch. Cached: {cached.get('count')}/{cached.get('quality')}, Requested: {num_screenshots}/{quality}")
             
             # Create temp directory
             user_temp_dir = os.path.join(Config.TEMP_DIR, str(video_msg.from_user.id))
@@ -913,7 +919,6 @@ class MainProcessor:
         if links.get('telegraph'):
             parts.append(f"🔗 [Telegraph]({links['telegraph']})")
         return "\n".join(parts) if parts else "⚠️ No upload links available"
-
 # ═══════════════════════════════════════════════════════════════════
 # SECTION 10: PYROGRAM CLIENT
 # ═══════════════════════════════════════════════════════════════════
