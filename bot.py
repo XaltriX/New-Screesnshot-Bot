@@ -1,10 +1,8 @@
 """
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    LINKZ SCREENSHOT BOT - Ultimate Version
+    LINKZ SCREENSHOT BOT - Complete with Queue System
     Owner: @NeonGhost
     Powered by: @Linkz_Wallah
-    
-    HEROKU DEPLOYMENT READY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -33,10 +31,10 @@ try:
     MOVIEPY_AVAILABLE = True
 except ImportError:
     MOVIEPY_AVAILABLE = False
-    print("⚠️ MoviePy not available, using fallback method")
+    print("⚠️ MoviePy not available, using FFmpeg only")
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 1: LOGGING SETUP (WINDOWS COMPATIBLE)
+# LOGGING SETUP
 # ═══════════════════════════════════════════════════════════════════
 
 if sys.platform == 'win32':
@@ -57,67 +55,50 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 2: CONFIGURATION
+# CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════
 
 class Config:
-    # Bot Credentials
     API_ID = int(os.getenv("API_ID", "24955235"))
     API_HASH = os.getenv("API_HASH", "f317b3f7bbe390346d8b46868cff0de8")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "8151073275:AAE3cgRjo6SlUzGcMl6hG6mXMKBEs4dO3Yw")
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "8151073075:AAEF_R2c7ZyN-c4t3gt4NdcHpa3AD5Qdm6k")
     
-    # Owner
     OWNER_USERNAME = os.getenv("OWNER_USERNAME", "NeonGhost")
     OWNER_USER_ID = None
     
-    # Watermark
     WATERMARK_TEXT = "BY @Linkz_Wallah"
     WATERMARK_FONT_SIZE = 60
     WATERMARK_PADDING = 20
     
-    # Upload APIs
     CATBOX_API = "https://catbox.moe/user/api.php"
-    ENVS_API = "https://envs.sh"
     TELEGRAPH_API = "https://telegra.ph/upload"
     
-    # Collage Settings - FIXED FOR BETTER SPACING
     COLLAGE_BACKGROUND = "#000000"
-    FRAME_BORDER = 20  # Increased from 10
-    FRAME_SPACING = 5   # Reduced from 15 to minimize gaps
-    IMAGE_PADDING = 0   # No padding inside frames
+    FRAME_BORDER = 20
+    FRAME_SPACING = 5
+    IMAGE_PADDING = 0
     
-    # Quality Settings
     QUALITIES = {"low": 640, "medium": 960, "high": 1280}
     DEFAULT_QUALITY = "medium"
     
-    # Limits
-    MAX_VIDEO_SIZE = 500 * 1024 * 1024  # 500MB
-    MAX_DURATION = 3600  # 1 hour
+    MAX_VIDEO_SIZE = 500 * 1024 * 1024
+    MAX_DURATION = 3600
     
-    # Paths
     DB_PATH = "bot_data.db"
     TEMP_DIR = "./temp_downloads"
     
-    # Grid Layouts
     GRID_LAYOUTS = {
-        4: (2, 2),
-        6: (2, 3),
-        8: (2, 4),
-        9: (3, 3),
-        10: (2, 5),
-        12: (3, 4),
-        15: (3, 5)
+        4: (2, 2), 6: (2, 3), 8: (2, 4), 9: (3, 3),
+        10: (2, 5), 12: (3, 4), 15: (3, 5)
     }
     
-    # FFmpeg paths (Heroku buildpack compatible)
-    FFMPEG_PATH = os.getenv("FFMPEG_BINARY", "/app/vendor/ffmpeg/ffmpeg")
-    FFPROBE_PATH = os.getenv("FFPROBE_BINARY", "/app/vendor/ffmpeg/ffprobe")
+    FFMPEG_PATH = "ffmpeg"
+    FFPROBE_PATH = "ffprobe"
 
-# Create temp directory
 os.makedirs(Config.TEMP_DIR, exist_ok=True)
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 3: PROGRESS BAR
+# PROGRESS BAR
 # ═══════════════════════════════════════════════════════════════════
 
 class ProgressBar:
@@ -154,7 +135,47 @@ class ProgressBar:
         return f"☁️ **Uploading to Cloud**\n\n{service}: {bar}"
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 4: MESSAGES
+# QUEUE SYSTEM
+# ═══════════════════════════════════════════════════════════════════
+
+class VideoQueue:
+    def __init__(self):
+        self.queue = asyncio.Queue()
+        self.processing = False
+        self.current_item = None
+    
+    async def add(self, video_msg: Message, num_screenshots: int, user_id: int):
+        queue_item = {
+            'video_msg': video_msg,
+            'num_screenshots': num_screenshots,
+            'user_id': user_id,
+            'filename': getattr(video_msg.video or video_msg.document, 'file_name', 'video.mp4'),
+            'position': self.queue.qsize() + 1,
+            'added_at': time.time()
+        }
+        await self.queue.put(queue_item)
+        return queue_item['position']
+    
+    def get_position(self, user_id: int) -> int:
+        return self.queue.qsize()
+    
+    def is_empty(self) -> bool:
+        return self.queue.empty()
+    
+    async def get_next(self):
+        if not self.queue.empty():
+            self.current_item = await self.queue.get()
+            return self.current_item
+        return None
+    
+    def task_done(self):
+        self.queue.task_done()
+        self.current_item = None
+
+video_queue = VideoQueue()
+
+# ═══════════════════════════════════════════════════════════════════
+# MESSAGES
 # ═══════════════════════════════════════════════════════════════════
 
 class Messages:
@@ -179,10 +200,10 @@ Welcome! Send me a video and I'll create a beautiful cinematic collage!
 
 **✨ Features:**
 • Cinematic film-strip style
-• Multiple cloud uploads
+• Multi-cloud uploads (Catbox, Telegraph)
 • Smart caching
+• Queue system
 • Live progress tracking
-• Auto watermark
 
 **📊 Limits:**
 • Max size: 500MB
@@ -197,8 +218,8 @@ _Powered by @Linkz_Wallah_
 
 1️⃣ Send any video file
 2️⃣ Choose screenshot count (4-15)
-3️⃣ Watch live progress
-4️⃣ Get collage with download links!
+3️⃣ Wait for processing (queue system)
+4️⃣ Get your collage!
 
 ━━━━━━━━━━━━━━━━
 
@@ -214,6 +235,7 @@ _Powered by @Linkz_Wallah_
     SUCCESS = """
 ✅ **Collage Ready!**
 
+📹 Video: {filename}
 📸 Screenshots: {count}
 💾 Size: {size} MB
 ⏱️ Time: {duration}s
@@ -229,13 +251,33 @@ _Powered by @Linkz_Wallah_
 _Powered by @Linkz_Wallah_
 """
 
+    QUEUE_ADDED = """
+🎬 **Added to Queue**
+
+📹 Video: {filename}
+📊 Queue Position: #{position}
+⏱️ Estimated Wait: ~{wait_time}
+
+━━━━━━━━━━━━━━━━
+_You'll be notified when processing starts_
+"""
+
+    QUEUE_PROCESSING = """
+⚙️ **Processing Started**
+
+📹 Video: {filename}
+📊 Queue: {current}/{total}
+
+━━━━━━━━━━━━━━━━
+"""
+
     ERROR = "❌ **Error:** {error}\n\n_Contact @{owner} if this persists._"
     VIDEO_TOO_LARGE = "❌ Video too large!\n\nMax: 500MB\nYour video: {size}MB"
     VIDEO_TOO_LONG = "❌ Video too long!\n\nMax: 1 hour\nYour video: {duration} min"
     CACHE_HIT = "⚡ **Cached Result!**\n\nSending saved links instantly..."
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 5: DATABASE
+# DATABASE
 # ═══════════════════════════════════════════════════════════════════
 
 class Database:
@@ -259,7 +301,6 @@ class Database:
             CREATE TABLE IF NOT EXISTS cache (
                 video_hash TEXT PRIMARY KEY,
                 catbox_link TEXT,
-                envs_link TEXT,
                 telegraph_link TEXT,
                 screenshot_count INTEGER,
                 quality TEXT,
@@ -307,24 +348,23 @@ class Database:
     
     def get_cached_links(self, video_hash: str) -> Optional[Dict]:
         self.cursor.execute("""
-            SELECT catbox_link, envs_link, telegraph_link, screenshot_count, quality
+            SELECT catbox_link, telegraph_link, screenshot_count, quality
             FROM cache WHERE video_hash = ?
         """, (video_hash,))
         row = self.cursor.fetchone()
         if row:
             return {
-                'catbox': row[0], 'envs': row[1], 'telegraph': row[2],
-                'count': row[3], 'quality': row[4]
+                'catbox': row[0], 'telegraph': row[1],
+                'count': row[2], 'quality': row[3]
             }
         return None
     
     def cache_links(self, video_hash: str, links: Dict, count: int, quality: str):
         self.cursor.execute("""
             INSERT OR REPLACE INTO cache 
-            (video_hash, catbox_link, envs_link, telegraph_link, screenshot_count, quality)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (video_hash, links.get('catbox'), links.get('envs'), 
-              links.get('telegraph'), count, quality))
+            (video_hash, catbox_link, telegraph_link, screenshot_count, quality)
+            VALUES (?, ?, ?, ?, ?)
+        """, (video_hash, links.get('catbox'), links.get('telegraph'), count, quality))
         self.conn.commit()
     
     def update_analytics(self, user_id: int, screenshots: int, time_taken: int, size_mb: float):
@@ -354,7 +394,7 @@ class Database:
 
 db = Database()
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 6: VIDEO PROCESSOR (MOVIEPY + FFMPEG FALLBACK)
+# SECTION 6: VIDEO PROCESSOR (FFmpeg Based)
 # ═══════════════════════════════════════════════════════════════════
 
 class VideoProcessor:
@@ -364,45 +404,37 @@ class VideoProcessor:
     
     @staticmethod
     async def get_video_info(video_path: str) -> Optional[float]:
-        """Get video duration using ffprobe or moviepy"""
-        
-        # Try ffprobe first (for Heroku)
-        if os.path.exists(Config.FFPROBE_PATH):
-            try:
-                cmd = [
-                    Config.FFPROBE_PATH,
-                    '-v', 'error',
-                    '-show_entries', 'format=duration',
-                    '-of', 'default=noprint_wrappers=1:nokey=1',
-                    video_path
-                ]
-                log.info(f"Running ffprobe: {' '.join(cmd)}")
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await proc.communicate()
-                if stdout:
-                    duration = float(stdout.decode().strip())
-                    log.info(f"Duration from ffprobe: {duration}s")
-                    return duration
-                log.error(f"FFprobe stderr: {stderr.decode()}")
-            except Exception as e:
-                log.error(f"FFprobe failed: {e}")
-        
-        # Fallback to MoviePy
-        if MOVIEPY_AVAILABLE:
-            try:
-                clip = VideoFileClip(video_path)
-                duration = clip.duration
-                clip.close()
-                log.info(f"Duration from MoviePy: {duration}s")
+        """Get video duration using ffprobe"""
+        try:
+            cmd = [
+                "ffprobe",
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                video_path
+            ]
+            log.info(f"Getting duration: {' '.join(cmd[:3])}...")
+            
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            
+            if stdout:
+                duration = float(stdout.decode().strip())
+                log.info(f"Video duration: {duration:.2f}s")
                 return duration
-            except Exception as e:
-                log.error(f"MoviePy failed: {e}")
+            
+            if stderr:
+                log.error(f"FFprobe error: {stderr.decode()[:200]}")
+            
+        except FileNotFoundError:
+            log.error("FFprobe command not found!")
+        except Exception as e:
+            log.error(f"Error getting duration: {e}")
         
-        log.error("No method available to get video duration")
         return None
     
     @staticmethod
@@ -413,7 +445,7 @@ class VideoProcessor:
         status_msg: Message,
         safe_edit
     ) -> List[Tuple[str, float]]:
-        """Extract screenshots using MoviePy"""
+        """Extract screenshots using MoviePy (Fallback)"""
         screenshots = []
         
         try:
@@ -460,11 +492,11 @@ class VideoProcessor:
         status_msg: Message,
         safe_edit
     ) -> List[Tuple[str, float]]:
-        """Extract screenshots using FFmpeg (Heroku compatible)"""
+        """Extract screenshots using FFmpeg"""
         screenshots = []
         
         try:
-            # Get duration first
+            # Get duration
             duration = await VideoProcessor.get_video_info(video_path)
             if not duration:
                 log.error("Could not get video duration")
@@ -472,7 +504,6 @@ class VideoProcessor:
             
             interval = duration / (num_screenshots + 1)
             target_width = Config.QUALITIES[quality]
-            
             start_time = time.time()
             
             for i in range(1, num_screenshots + 1):
@@ -482,9 +513,8 @@ class VideoProcessor:
                     f"shot_{int(time.time())}_{i}.jpg"
                 )
                 
-                # FFmpeg command with proper scaling
                 cmd = [
-                    Config.FFMPEG_PATH,
+                    "ffmpeg",
                     '-ss', str(timestamp),
                     '-i', video_path,
                     '-vf', f'scale={target_width}:-1',
@@ -494,194 +524,16 @@ class VideoProcessor:
                     screenshot_path
                 ]
                 
-                log.info(f"Running ffmpeg: {' '.join(cmd)}")
+                log.info(f"Extracting screenshot {i}/{num_screenshots} at {timestamp:.1f}s")
                 
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                
-                stdout, stderr = await proc.communicate()
-                
-                if os.path.exists(screenshot_path):
-                    screenshots.append((screenshot_path, timestamp))
-                    
-                    elapsed = int(time.time() - start_time)
-                    progress_text = ProgressBar.extraction(i, num_screenshots, elapsed)
-                    await safe_edit(status_msg, progress_text)
-                else:
-                    log.error(f"Screenshot not created: {screenshot_path}")
-                    log.error(f"FFmpeg stderr: {stderr.decode()}")
-            
-            log.info(f"Extracted {len(screenshots)} screenshots using FFmpeg")
-            return screenshots
-            
-        except Exception as e:
-            log.error(f"FFmpeg extraction error: {e}")
-            return []
-    
-    @staticmethod
-    async def extract_screenshots(
-        video_path: str,
-        num_screenshots: int,
-        quality: str,
-        status_msg: Message,
-        safe_edit
-    ) -> List[Tuple[str, float]]:
-        """Main extraction method with fallback"""
-        
-        # Try FFmpeg first if available (for Heroku)
-        if os.path.exists(Config.FFMPEG_PATH):
-            log.info("Using FFmpeg for extraction")
-            screenshots = await VideoProcessor.extract_screenshots_ffmpeg(
-                video_path, num_screenshots, quality, status_msg, safe_edit
-            )
-            if screenshots:
-                return screenshots
-        
-        # Fallback to MoviePy
-        if MOVIEPY_AVAILABLE:
-            log.info("Using MoviePy for extraction")
-            screenshots = await VideoProcessor.extract_screenshots_moviepy(
-                video_path, num_screenshots, quality, status_msg, safe_edit
-            )
-            if screenshots:
-                return screenshots
-        
-        log.error("No extraction method succeeded")
-        return []
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 7: COLLAGE CREATOR (FIXED SPACING)
-# ═══════════════════════════════════════════════════════════════════
-
-class CollageCreator:
-    @staticmethod
-    def create_cinematic_collage(
-        screenshots: List[Tuple[str, float]],
-        output_path: str
-    ) -> bool:
-        try:
-            num_shots = len(screenshots)
-            
-            if num_shots in Config.GRID_LAYOUTS:
-                rows, cols = Config.GRID_LAYOUTS[num_shots]
-            else:
-                cols = math.ceil(math.sqrt(num_shots))
-                rows = math.ceil(num_shots / cols)
-            
-            # Load first image to get original dimensions
-            first_img = Image.open(screenshots[0][0])
-            img_width, img_height = first_img.size
-            
-            # Calculate dimensions that fill the frame better
-            # Target collage width around 3000px for high quality
-            target_collage_width = 3000
-            target_width = (target_collage_width - (Config.FRAME_SPACING * (cols + 1)) - (Config.FRAME_BORDER * 2)) // cols
-            target_height = int(target_width * (img_height / img_width))
-            
-            border = Config.FRAME_BORDER
-            spacing = Config.FRAME_SPACING
-            
-            # Calculate final collage size
-            collage_width = (target_width * cols) + (spacing * (cols + 1)) + (border * 2)
-            collage_height = (target_height * rows) + (spacing * (rows + 1)) + (border * 2)
-            
-            log.info(f"Collage size: {collage_width}x{collage_height}, Frame: {target_width}x{target_height}")
-            
-            # Create black canvas
-            collage = Image.new('RGB', (collage_width, collage_height), Config.COLLAGE_BACKGROUND)
-            draw = ImageDraw.Draw(collage)
-            
-            # Load fonts
-            try:
-                if sys.platform == 'win32':
-                    font = ImageFont.truetype("C:\\Windows\\Fonts\\arial.ttf", 36)
-                    wm_font = ImageFont.truetype("C:\\Windows\\Fonts\\arialbd.ttf", Config.WATERMARK_FONT_SIZE)
-                else:
-                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
-                    wm_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", Config.WATERMARK_FONT_SIZE)
-            except:
-                font = ImageFont.load_default()
-                wm_font = font
-            
-            # Place screenshots
-            for idx, (img_path, timestamp) in enumerate(screenshots[:num_shots]):
-                row = idx // cols
-                col = idx % cols
-                
-                # Load and resize image to EXACTLY fill the frame
-                img = Image.open(img_path)
-                img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
-                
-                # Calculate position with minimal gaps
-                x = border + spacing + (col * (target_width + spacing))
-                y = border + spacing + (row * (target_height + spacing))
-                
-                # Paste image directly (no padding)
-                collage.paste(img, (x, y))
-                
-                # Add timestamp overlay in bottom-left
-                time_str = str(datetime.timedelta(seconds=int(timestamp)))
-                
-                # Get text dimensions
-                text_bbox = draw.textbbox((0, 0), time_str, font=font)
-                text_width = text_bbox[2] - text_bbox[0]
-                text_height = text_bbox[3] - text_bbox[1]
-                
-                # Position in bottom-left corner with padding
-                text_bg_x = x + 15
-                text_bg_y = y + target_height - text_height - 25
-                
-                # Draw semi-transparent background for timestamp
-                overlay = Image.new('RGBA', collage.size, (0, 0, 0, 0))
-                overlay_draw = ImageDraw.Draw(overlay)
-                overlay_draw.rectangle(
-                    [text_bg_x - 8, text_bg_y - 5,
-                     text_bg_x + text_width + 8, text_bg_y + text_height + 5],
-                    fill=(0, 0, 0, 200)
-                )
-                collage = Image.alpha_composite(collage.convert('RGBA'), overlay).convert('RGB')
-                draw = ImageDraw.Draw(collage)
-                
-                # Draw timestamp text
-                draw.text((text_bg_x, text_bg_y), time_str, font=font, fill='white')
-            
-            # Add watermark in bottom-right
-            watermark = Config.WATERMARK_TEXT
-            wm_bbox = draw.textbbox((0, 0), watermark, font=wm_font)
-            wm_width = wm_bbox[2] - wm_bbox[0]
-            wm_height = wm_bbox[3] - wm_bbox[1]
-            
-            wm_x = collage_width - wm_width - Config.WATERMARK_PADDING - border
-            wm_y = collage_height - wm_height - Config.WATERMARK_PADDING - border
-            
-            # Watermark background
-            overlay = Image.new('RGBA', collage.size, (0, 0, 0, 0))
-            overlay_draw = ImageDraw.Draw(overlay)
-            overlay_draw.rectangle(
-                [wm_x - 15, wm_y - 10, wm_x + wm_width + 15, wm_y + wm_height + 10],
-                fill=(0, 0, 0, 180)
-            )
-            collage = Image.alpha_composite(collage.convert('RGBA'), overlay).convert('RGB')
-            draw = ImageDraw.Draw(collage)
-            
-            # Draw watermark
-            draw.text((wm_x, wm_y), watermark, font=wm_font, fill='white')
-            
-            # Save with high quality
-            collage.save(output_path, quality=95, optimize=True)
-            
-            log.info(f"Collage saved: {output_path}, size: {os.path.getsize(output_path) / (1024*1024):.2f}MB")
-            return True
-            
-        except Exception as e:
-            log.error(f"Collage creation error: {e}", exc_info=True)
-            return False
-
-# ═══════════════════════════════════════════════════════════════════
-# SECTION 8: CLOUD UPLOADER
+# SECTION 8: CLOUD UPLOADER (CATBOX + TELEGRAPH ONLY)
 # ═══════════════════════════════════════════════════════════════════
 
 class CloudUploader:
@@ -703,25 +555,6 @@ class CloudUploader:
                         log.error(f"Catbox upload failed: HTTP {resp.status}")
         except Exception as e:
             log.error(f"Catbox upload error: {e}")
-        return None
-    
-    @staticmethod
-    async def upload_to_envs(file_path: str) -> Optional[str]:
-        try:
-            async with aiohttp.ClientSession() as session:
-                with open(file_path, 'rb') as f:
-                    data = aiohttp.FormData()
-                    data.add_field('file', f)
-                    
-                    timeout = aiohttp.ClientTimeout(total=180)
-                    async with session.post(Config.ENVS_API, data=data, timeout=timeout) as resp:
-                        if resp.status == 200:
-                            url = (await resp.text()).strip()
-                            log.info(f"EnvS upload success: {url}")
-                            return url
-                        log.error(f"EnvS upload failed: HTTP {resp.status}")
-        except Exception as e:
-            log.error(f"EnvS upload error: {e}")
         return None
     
     @staticmethod
@@ -750,7 +583,6 @@ class CloudUploader:
         links = {}
         services = [
             ('Catbox', CloudUploader.upload_to_catbox),
-            ('EnvS', CloudUploader.upload_to_envs),
             ('Telegraph', CloudUploader.upload_to_telegraph)
         ]
         
@@ -772,12 +604,16 @@ class CloudUploader:
 
 class MainProcessor:
     @staticmethod
-    async def process_video(message: Message, video_msg: Message, num_screenshots: int):
+    async def process_video(status_msg: Message, video_msg: Message, num_screenshots: int, queue_position: int, queue_total: int):
         start_time = time.time()
         video_path = None
         collage_path = None
         screenshot_files = []
         last_text = ""
+        
+        # Get video info
+        video = video_msg.video or video_msg.document
+        filename = getattr(video, 'file_name', 'video.mp4')
         
         async def safe_edit(msg: Message, text: str):
             nonlocal last_text
@@ -793,39 +629,49 @@ class MainProcessor:
                         log.error(f"Edit error: {e}")
         
         try:
-            video = video_msg.video
             video_hash = VideoProcessor.generate_hash(video.file_id, video.file_size)
             quality = db.get_user_quality(video_msg.from_user.id)
             
+            # Show processing status
+            await safe_edit(
+                status_msg,
+                Messages.QUEUE_PROCESSING.format(
+                    filename=filename,
+                    current=queue_position,
+                    total=queue_total
+                )
+            )
+            
             # Check cache
             cached = db.get_cached_links(video_hash)
-            if cached and any([cached.get('catbox'), cached.get('envs'), cached.get('telegraph')]):
-                await safe_edit(message, Messages.CACHE_HIT)
+            if cached and any([cached.get('catbox'), cached.get('telegraph')]):
+                await safe_edit(status_msg, Messages.CACHE_HIT)
                 await asyncio.sleep(1)
                 
                 links_text = MainProcessor._format_links(cached)
                 
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔗 Catbox", url=cached['catbox'])] if cached.get('catbox') else [],
-                    [InlineKeyboardButton("🔗 EnvS", url=cached['envs'])] if cached.get('envs') else [],
                     [InlineKeyboardButton("🔗 Telegraph", url=cached['telegraph'])] if cached.get('telegraph') else [],
                 ])
                 
+                # Reply to original video
                 await video_msg.reply_text(
                     Messages.SUCCESS.format(
+                        filename=filename,
                         count=cached['count'],
                         size="Cached",
                         duration=int(time.time() - start_time),
                         quality=cached['quality'],
                         links=links_text
                     ),
-                    reply_markup=keyboard if any([cached.get('catbox'), cached.get('envs'), cached.get('telegraph')]) else None
+                    reply_markup=keyboard if any([cached.get('catbox'), cached.get('telegraph')]) else None
                 )
                 
-                await message.delete()
+                await status_msg.delete()
                 return
             
-            # Create user-specific temp directory
+            # Create temp directory
             user_temp_dir = os.path.join(Config.TEMP_DIR, str(video_msg.from_user.id))
             os.makedirs(user_temp_dir, exist_ok=True)
             
@@ -838,21 +684,21 @@ class MainProcessor:
             async def progress(current, total):
                 pct = int((current / total) * 100) if total > 0 else 0
                 if (pct - last_pct[0] >= 5) or (time.time() - last_update[0] >= 3):
-                    await safe_edit(message, ProgressBar.download(current, total))
+                    await safe_edit(status_msg, ProgressBar.download(current, total))
                     last_update[0] = time.time()
                     last_pct[0] = pct
             
             await video_msg.download(file_name=video_path, progress=progress)
             
             # Extract screenshots
-            await safe_edit(message, "🎬 **Analyzing video...**")
+            await safe_edit(status_msg, "🎬 **Analyzing video...**")
             
             screenshots = await VideoProcessor.extract_screenshots(
-                video_path, num_screenshots, quality, message, safe_edit
+                video_path, num_screenshots, quality, status_msg, safe_edit
             )
             
             if not screenshots:
-                await safe_edit(message, Messages.ERROR.format(
+                await safe_edit(status_msg, Messages.ERROR.format(
                     error="Failed to extract screenshots",
                     owner=Config.OWNER_USERNAME
                 ))
@@ -861,32 +707,28 @@ class MainProcessor:
             screenshot_files = [s[0] for s in screenshots]
             
             # Create collage
-            await safe_edit(message, "🎨 **Creating cinematic collage...**")
+            await safe_edit(status_msg, "🎨 **Creating cinematic collage...**")
             
             collage_path = os.path.join(user_temp_dir, "collage.jpg")
             success = CollageCreator.create_cinematic_collage(screenshots, collage_path)
             
             if not success:
-                await safe_edit(message, Messages.ERROR.format(
+                await safe_edit(status_msg, Messages.ERROR.format(
                     error="Collage creation failed",
                     owner=Config.OWNER_USERNAME
                 ))
                 return
             
             # Upload to cloud
-            links = await CloudUploader.multi_upload(collage_path, message, safe_edit)
+            links = await CloudUploader.multi_upload(collage_path, status_msg, safe_edit)
             
             if not any(links.values()):
-                await safe_edit(message, Messages.ERROR.format(
-                    error="All uploads failed. Sending collage directly.",
-                    owner=Config.OWNER_USERNAME
-                ))
-                # Even if uploads fail, send the collage directly
+                # Send collage directly if upload fails
                 await video_msg.reply_photo(
                     photo=collage_path,
-                    caption=f"✅ **Collage Ready!**\n\n📸 Screenshots: {len(screenshots)}\n🎨 Quality: {quality}\n\n_Upload to cloud failed, but here's your collage!_"
+                    caption=f"✅ **{filename}**\n\n📸 Screenshots: {len(screenshots)}\n🎨 Quality: {quality}\n\n_Upload failed, but here's your collage!_"
                 )
-                await message.delete()
+                await status_msg.delete()
                 return
             
             # Cache results
@@ -900,21 +742,20 @@ class MainProcessor:
             # Format links
             links_text = MainProcessor._format_links(links)
             
-            # Create keyboard with working links only
+            # Create keyboard
             keyboard_buttons = []
             if links.get('catbox'):
                 keyboard_buttons.append([InlineKeyboardButton("🔗 Catbox", url=links['catbox'])])
-            if links.get('envs'):
-                keyboard_buttons.append([InlineKeyboardButton("🔗 EnvS", url=links['envs'])])
             if links.get('telegraph'):
                 keyboard_buttons.append([InlineKeyboardButton("🔗 Telegraph", url=links['telegraph'])])
             
             keyboard = InlineKeyboardMarkup(keyboard_buttons) if keyboard_buttons else None
             
-            # Send collage with links
+            # Send collage as REPLY to original video
             await video_msg.reply_photo(
                 photo=collage_path,
                 caption=Messages.SUCCESS.format(
+                    filename=filename,
                     count=len(screenshots),
                     size=f"{file_size_mb:.2f}",
                     duration=process_time,
@@ -924,7 +765,7 @@ class MainProcessor:
                 reply_markup=keyboard
             )
             
-            await message.delete()
+            await status_msg.delete()
             
         except Exception as e:
             log.error(f"Processing error: {e}", exc_info=True)
@@ -932,9 +773,9 @@ class MainProcessor:
             if "timed out" in error_msg.lower():
                 error_msg = "Download timeout. Try a smaller video."
             elif "no such file" in error_msg.lower():
-                error_msg = "FFmpeg/FFprobe not found. Please check Heroku buildpack."
+                error_msg = "FFmpeg/FFprobe not found."
             
-            await safe_edit(message, Messages.ERROR.format(
+            await safe_edit(status_msg, Messages.ERROR.format(
                 error=error_msg[:100],
                 owner=Config.OWNER_USERNAME
             ))
@@ -964,8 +805,6 @@ class MainProcessor:
         parts = []
         if links.get('catbox'):
             parts.append(f"🔗 [Catbox]({links['catbox']})")
-        if links.get('envs'):
-            parts.append(f"🔗 [EnvS]({links['envs']})")
         if links.get('telegraph'):
             parts.append(f"🔗 [Telegraph]({links['telegraph']})")
         return "\n".join(parts) if parts else "⚠️ No upload links available"
@@ -1073,10 +912,9 @@ async def quality_command(client: Client, message: Message):
 @authorized_only
 async def video_handler(client: Client, message: Message):
     try:
-        # Handle both video and document (for large files)
         video = message.video or message.document
         
-        # Check if document is a video
+        # Check if document is video
         if message.document and not message.document.mime_type.startswith('video/'):
             return
         
@@ -1087,7 +925,7 @@ async def video_handler(client: Client, message: Message):
             ))
             return
         
-        # Duration check (if available)
+        # Duration check
         if hasattr(video, 'duration') and video.duration and video.duration > Config.MAX_DURATION:
             await message.reply_text(Messages.VIDEO_TOO_LONG.format(
                 duration=f"{video.duration / 60:.1f}"
@@ -1144,10 +982,25 @@ async def screenshot_callback(client: Client, callback: CallbackQuery):
     video_msg = user_videos[user_id]
     
     await callback.answer()
-    status_msg = await callback.message.edit_text("🎬 **Starting processing...**")
     
-    # Process in background
-    asyncio.create_task(MainProcessor.process_video(status_msg, video_msg, num))
+    # Add to queue
+    position = await video_queue.add(video_msg, num, user_id)
+    
+    # Get filename
+    video = video_msg.video or video_msg.document
+    filename = getattr(video, 'file_name', 'video.mp4')
+    
+    # Calculate estimated wait time
+    wait_time = f"{(position - 1) * 2} min" if position > 1 else "Starting now"
+    
+    # Send queue confirmation
+    await callback.message.edit_text(
+        Messages.QUEUE_ADDED.format(
+            filename=filename,
+            position=position,
+            wait_time=wait_time
+        )
+    )
 
 @app.on_callback_query(filters.regex(r"^quality_"))
 async def quality_callback(client: Client, callback: CallbackQuery):
@@ -1206,7 +1059,56 @@ async def stats_callback(client: Client, callback: CallbackQuery):
     await callback.message.reply_text(text)
 
 # ═══════════════════════════════════════════════════════════════════
-# SECTION 14: MAIN ENTRY POINT
+# SECTION 14: QUEUE PROCESSOR WORKER
+# ═══════════════════════════════════════════════════════════════════
+
+async def queue_processor():
+    """Background worker to process video queue"""
+    log.info("Queue processor started")
+    
+    while True:
+        try:
+            if not video_queue.is_empty():
+                item = await video_queue.get_next()
+                
+                if item:
+                    video_msg = item['video_msg']
+                    num_screenshots = item['num_screenshots']
+                    user_id = item['user_id']
+                    filename = item['filename']
+                    
+                    log.info(f"Processing: {filename} for user {user_id}")
+                    
+                    # Create status message
+                    status_msg = await video_msg.reply_text("⚙️ **Processing started...**")
+                    
+                    # Get current queue size
+                    queue_total = video_queue.queue.qsize() + 1
+                    queue_position = 1
+                    
+                    # Process the video
+                    await MainProcessor.process_video(
+                        status_msg,
+                        video_msg,
+                        num_screenshots,
+                        queue_position,
+                        queue_total
+                    )
+                    
+                    # Mark as done
+                    video_queue.task_done()
+                    
+                    log.info(f"Completed: {filename}")
+            else:
+                # Queue empty, wait
+                await asyncio.sleep(2)
+                
+        except Exception as e:
+            log.error(f"Queue processor error: {e}", exc_info=True)
+            await asyncio.sleep(5)
+
+# ═══════════════════════════════════════════════════════════════════
+# SECTION 15: MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════
 
 async def main():
@@ -1215,21 +1117,45 @@ async def main():
     log.info(f"Owner: @{Config.OWNER_USERNAME}")
     log.info("=" * 60)
     
-    # Check FFmpeg availability
-    if os.path.exists(Config.FFMPEG_PATH):
-        log.info(f"✅ FFmpeg found: {Config.FFMPEG_PATH}")
-    else:
-        log.warning(f"⚠️ FFmpeg not found at {Config.FFMPEG_PATH}")
-    
-    if os.path.exists(Config.FFPROBE_PATH):
-        log.info(f"✅ FFprobe found: {Config.FFPROBE_PATH}")
-    else:
-        log.warning(f"⚠️ FFprobe not found at {Config.FFPROBE_PATH}")
+    # Test FFmpeg
+    log.info("Testing FFmpeg installation...")
+    try:
+        import subprocess
+        
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            version_line = result.stdout.split('\n')[0]
+            log.info(f"✅ FFmpeg: {version_line}")
+        else:
+            log.error("❌ FFmpeg test failed")
+            
+        result = subprocess.run(
+            ["ffprobe", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            version_line = result.stdout.split('\n')[0]
+            log.info(f"✅ FFprobe: {version_line}")
+        else:
+            log.error("❌ FFprobe test failed")
+            
+    except FileNotFoundError as e:
+        log.error(f"❌ FFmpeg/FFprobe not found: {e}")
+        log.error("   Make sure APT buildpack is installed!")
+    except Exception as e:
+        log.error(f"❌ Error testing FFmpeg: {e}")
     
     if MOVIEPY_AVAILABLE:
         log.info("✅ MoviePy available as fallback")
     else:
-        log.warning("⚠️ MoviePy not available")
+        log.info("ℹ️  MoviePy not installed (using FFmpeg)")
     
     await app.start()
     
@@ -1237,11 +1163,16 @@ async def main():
     log.info(f"✅ Bot started: @{me.username}")
     log.info("=" * 60)
     
+    # Start queue processor in background
+    queue_task = asyncio.create_task(queue_processor())
+    log.info("✅ Queue processor started")
+    
     try:
         await idle()
     except KeyboardInterrupt:
         log.info("Bot stopped by user")
     finally:
+        queue_task.cancel()
         await app.stop()
         log.info("Bot stopped.")
 
@@ -1252,3 +1183,4 @@ if __name__ == "__main__":
         log.info("Bot interrupted")
     except Exception as e:
         log.error(f"Fatal error: {e}", exc_info=True)
+
