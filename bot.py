@@ -61,7 +61,7 @@ log = logging.getLogger(__name__)
 class Config:
     API_ID = int(os.getenv("API_ID", "24955235"))
     API_HASH = os.getenv("API_HASH", "f317b3f7bbe390346d8b46868cff0de8")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "8151073075:AAEF_R2c7ZyN-c4t3gt4NdcHpa3AD5Qdm6k")
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "8151073275:AAG1GNMQaeiffKpzszeimnK9C9R0Uro-yxc")
     
     OWNER_USERNAME = os.getenv("OWNER_USERNAME", "NeonGhost")
     OWNER_USER_ID = None
